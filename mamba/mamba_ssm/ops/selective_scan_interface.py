@@ -7,8 +7,8 @@ from torch.cuda.amp import custom_bwd, custom_fwd
 from einops import rearrange, repeat
 
 from causal_conv1d import causal_conv1d_fn
-#import causal_conv1d_cuda
-#import selective_scan_cuda
+import causal_conv1d_cuda
+import selective_scan_cuda
 
 
 class SelectiveScanFn(torch.autograd.Function):
@@ -75,14 +75,12 @@ class SelectiveScanFn(torch.autograd.Function):
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                      return_last_state=False):
+                     return_last_state=False):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
     not considered in the backward pass.
     """
-    return selective_scan_ref(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
-
-
+    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
 
 
 def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
@@ -603,18 +601,17 @@ class BiMambaInnerFn(torch.autograd.Function):
                 dA, dA_b, dB, dC, dD,
                 ddelta_bias if delta_bias is not None else None,
                 dB_proj_bias, dC_proj_bias, None)
-
+    
 
 def mamba_inner_fn(
-        xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
-        out_proj_weight, out_proj_bias,
-        A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-        C_proj_bias=None, delta_softplus=True):
-    return mamba_inner_ref(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
-                           out_proj_weight, out_proj_bias,
-                           A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus)
-
-
+    xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
+    out_proj_weight, out_proj_bias,
+    A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
+    C_proj_bias=None, delta_softplus=True
+):
+    return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
+                              out_proj_weight, out_proj_bias,
+                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus)
 
 def bimamba_inner_fn(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,

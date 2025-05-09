@@ -43,6 +43,7 @@ from modeling.vivim import Vivim
 
 from poloy_metrics import *
 from modeling.utils import JointEdgeSegLoss
+from sd_metrics import calculate_object_metrics  # 导入对象级指标计算函数
 # torch.set_float32_matmul_precision('high')
 
 def structure_loss(pred, mask):
@@ -172,72 +173,98 @@ class CoolSystem(pl.LightningModule):
 
 
     def on_validation_epoch_end(self):
-
-        self.sm = Smeasure()
-        self.em = Emeasure()
-        self.mae = MAE()
-
-        dice_lst, specificity_lst, precision_lst, recall_lst, f_measure_lst, jaccard_lst = [], [], [], [], [], []
+        # 定义阈值
         Thresholds = np.linspace(1, 0, 256)
-        # print(Thresholds)
-        for pred, gt in zip(self.preds,self.gts):
+        
+        # 设置距离阈值
+        distance_threshold = 2  # 根据空间碎片大小设置为2像素
+        
+        # 像素级与对象级指标列表
+        dice_lst, jaccard_lst = [], []
+        obj_precision_lst, obj_recall_lst, obj_f1_lst, obj_fpr_lst = [], [], [], []
+        obj_tp_total, obj_fp_total, obj_fn_total = 0, 0, 0
+
+        for pred, gt in zip(self.preds, self.gts):
             pred = torch.sigmoid(pred)
-            # gt = gt.to(int)
-            self.sm.step(pred.squeeze(0).squeeze(0).detach().cpu().numpy(),gt.squeeze(0).squeeze(0).detach().cpu().numpy())
-            self.em.step(pred.squeeze(0).squeeze(0).detach().cpu().numpy(),gt.squeeze(0).squeeze(0).detach().cpu().numpy())
-            self.mae.step(pred.squeeze(0).squeeze(0).detach().cpu().numpy(),gt.squeeze(0).squeeze(0).detach().cpu().numpy())
-            gt = (gt>0.5).to(int)
-            dice_l, specificity_l, precision_l, recall_l, f_measure_l, jaccard_l = [], [], [], [], [], []
-            for j, threshold in enumerate(Thresholds):
-                # print(threshold)
-                pred_one_hot = (pred>threshold).to(int)
+            
+            # 计算更适合的阈值
+            gt_max = gt.max()
+            
+            # 如果gt最大值很小，使用动态阈值
+            gt_threshold = 0.5  # 默认阈值
+            if gt_max < 0.1:  # 如果最大值小于0.1，使用最大值的一半作为阈值
+                gt_threshold = gt_max / 2
+            
+            # 二值化GT
+            gt_binary = (gt > gt_threshold).to(int)
+            
+            # 像素级指标计算
+            dice_l, jaccard_l = [], []
+            for threshold in Thresholds:
+                pred_one_hot = (pred > threshold).to(int)
                 
-                dice, specificity, precision, recall, f_measure, jaccard = self.evaluate_one_img(pred_one_hot.detach().cpu().numpy(), gt.detach().cpu().numpy())
-                # print(dice)
+                # 计算像素级Dice和Jaccard
+                dice = misc2.dice(pred_one_hot.detach().cpu().numpy(), gt_binary.detach().cpu().numpy())
+                jaccard = misc2.jaccard(pred_one_hot.detach().cpu().numpy(), gt_binary.detach().cpu().numpy())
+                
                 dice_l.append(dice)
-                specificity_l.append(specificity)
-                precision_l.append(precision)
-                recall_l.append(recall)
-                f_measure_l.append(f_measure)
                 jaccard_l.append(jaccard)
+                
+                # 使用阈值0.5计算对象级指标(只计算一次)
+                if abs(threshold - 0.5) < 0.01:  # 选择接近0.5的阈值
+                    # 计算对象级指标
+                    pred_numpy = pred_one_hot.detach().cpu().numpy()
+                    gt_numpy = gt_binary.detach().cpu().numpy()
+                    
+                    obj_metrics = calculate_object_metrics(
+                        pred_numpy,  # 预测掩码
+                        gt_numpy,    # 真实掩码
+                        distance_threshold
+                    )
+                    
+                    # 收集对象级指标
+                    obj_precision_lst.append(obj_metrics['Precision'])
+                    obj_recall_lst.append(obj_metrics['Recall'])
+                    obj_f1_lst.append(obj_metrics['F1-Score'])
+                    obj_fpr_lst.append(obj_metrics['FPR'])
+                    
+                    # 累积TP, FP, FN
+                    obj_tp_total += obj_metrics['TP']
+                    obj_fp_total += obj_metrics['FP']
+                    obj_fn_total += obj_metrics['FN']
+            
+            # 存储平均像素级指标
             dice_lst.append(sum(dice_l) / len(dice_l))
-            specificity_lst.append(sum(specificity_l) / len(specificity_l))
-            precision_lst.append(sum(precision_l) / len(precision_l))
-            recall_lst.append(sum(recall_l) / len(recall_l))
-            f_measure_lst.append(sum(f_measure_l) / len(f_measure_l))
             jaccard_lst.append(sum(jaccard_l) / len(jaccard_l))
 
-
-            # print(sum(dice_l) / len(dice_l))
-
-        # mean
+        # 计算平均值
         dice = sum(dice_lst) / len(dice_lst)
-        acc = sum(specificity_lst) / len(specificity_lst)
-        precision = sum(precision_lst) / len(precision_lst)
-        recall = sum(recall_lst) / len(recall_lst)
-        f_measure = sum(f_measure_lst) / len(f_measure_lst)
         jac = sum(jaccard_lst) / len(jaccard_lst)
-
-        sm = self.sm.get_results()['Smeasure']
-        em = self.em.get_results()['meanEm']
-        mae = self.mae.get_results()['MAE']
-
-        print(len(self.gts))
-        print(len(self.preds))
         
-        self.log('Dice',dice)
-        self.log('Jaccard',jac)
-        self.log('Precision',precision)
-        self.log('Recall',recall)
-        self.log('Fmeasure',f_measure)
-        self.log('specificity',acc)
-        self.log('Smeasure',sm)
-        self.log('Emeasure',em)
-        self.log('MAE',mae)
+        # 计算对象级指标平均值
+        obj_precision = sum(obj_precision_lst) / len(obj_precision_lst) if obj_precision_lst else 0
+        obj_recall = sum(obj_recall_lst) / len(obj_recall_lst) if obj_recall_lst else 0
+        obj_f1 = sum(obj_f1_lst) / len(obj_f1_lst) if obj_f1_lst else 0
+        obj_fpr = sum(obj_fpr_lst) / len(obj_fpr_lst) if obj_fpr_lst else 0
+        
+        # 记录指标
+        self.log('Dice', dice)
+        self.log('Jaccard', jac)
+        
+        # 记录对象级指标
+        self.log('Object_Precision', obj_precision)
+        self.log('Object_Recall', obj_recall)
+        self.log('Object_F1', obj_f1)
+        self.log('Object_FPR', obj_fpr)
+        self.log('Object_TP', obj_tp_total)
+        self.log('Object_FP', obj_fp_total)
+        self.log('Object_FN', obj_fn_total)
 
         self.gts = []
         self.preds = []
-        print("Val: Dice {0}, Jaccard {1}, Precision {2}, Recall {3}, Fmeasure {4}, specificity: {5}, Smeasure {6}, Emeasure {7}, MAE: {8}".format(dice,jac,precision,recall,f_measure,acc,sm,em,mae))
+        print("Val: Dice {0}, Jaccard {1}".format(dice, jac))
+        print("Object Detection: Precision {0}, Recall {1}, F1 {2}, FPR {3}, TP {4}, FP {5}, FN {6}".format(
+            obj_precision, obj_recall, obj_f1, obj_fpr, obj_tp_total, obj_fp_total, obj_fn_total))
 
 
 
@@ -248,6 +275,11 @@ class CoolSystem(pl.LightningModule):
         neigbor,target = batch
         bz, nf, nc, h, w = neigbor.shape
 
+        # 如果Target最大值很小，使用动态阈值来增强可视化
+        if target.max() < 0.1:
+            target_viz = target / target.max()  # 归一化到[0,1]范围
+        else:
+            target_viz = target
 
         # import time
         # start = time.time()
@@ -258,13 +290,18 @@ class CoolSystem(pl.LightningModule):
 
         samples = samples[self.nFrames//2::self.nFrames]
 
-
         filename = "sample_{}.png".format(batch_idx)
-        save_image(samples,os.path.join(self.save_path, filename))      
+        save_image(samples, os.path.join(self.save_path, filename))      
         filename = "target_{}.png".format(batch_idx)
-        save_image(target,os.path.join(self.save_path, filename))
-
-
+        save_image(target_viz, os.path.join(self.save_path, filename))
+        
+        '''
+        # 保存二值化后的target
+        gt_threshold = target.max() / 2 if target.max() < 0.1 else 0.5
+        target_binary = (target > gt_threshold).float()
+        filename = "target_binary_{}.png".format(batch_idx)
+        save_image(target_binary, os.path.join(self.save_path, filename))
+        '''
 
         self.preds.append(samples)
         self.gts.append(target)
@@ -282,11 +319,12 @@ def main():
     RESUME = False
     resume_checkpoint_path = r'./checkpoints/ultra-epoch.ckpt'
     if RESUME == False:
-        resume_checkpoint_path =None
+        resume_checkpoint_path = None
+    
     #128: 32-0.0005
     args={
     'epochs': 200,  #datasetsw
-    'data_root':'./SDD/v1',
+    'data_root':'./SDD/tssnr/SNR500',
     
     'train_bs':4,
     'test_bs':1,
@@ -328,7 +366,7 @@ def main():
         max_epochs=hparams.epochs,
         accelerator='gpu',
         devices=1,
-        precision="16-mixed",
+        precision=32,
         logger=logger,
         strategy="auto",
         enable_progress_bar=True,
@@ -337,10 +375,13 @@ def main():
         #accumulate_grad_batches=2  # 添加梯度累积
     ) 
 
-
-    trainer.fit(model,ckpt_path=resume_checkpoint_path)
-    # val_path=r'./checkpoints/ultra-epoch.ckpt'
-    # trainer.validate(model,ckpt_path=val_path)
+    # 注释掉训练代码
+    # trainer.fit(model,ckpt_path=resume_checkpoint_path)
+    
+    # 指定要验证的模型权重路径
+    val_path = r'./checkpointlogs/ultra-epoch184-Dice-0.8364-Jaccard-0.7269.ckpt'  # 请确保这个路径指向您已训练好的模型权重
+    # 激活验证代码
+    trainer.validate(model, ckpt_path=val_path)
     
 if __name__ == '__main__':
 	#your code

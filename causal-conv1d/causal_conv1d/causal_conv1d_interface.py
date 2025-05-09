@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 
 
-#import causal_conv1d_cuda
+import causal_conv1d_cuda
 
 
 class CausalConv1dFn(torch.autograd.Function):
@@ -34,21 +34,16 @@ class CausalConv1dFn(torch.autograd.Function):
         return dx, dweight, dbias if bias is not None else None, None
 
 
-def causal_conv1d_fn(x, weight, bias=None, seq_idx=None, initial_states=None, return_final_states=False,
-                     final_states_out=None, activation=None, ):
+def causal_conv1d_fn(x, weight, bias=None, activation=None):
     """
     x: (batch, dim, seqlen)
     weight: (dim, width)
     bias: (dim,)
-    seq_idx: (batch, seqlen)
-    initial_states: (batch, dim, width - 1)
-    final_states_out: (batch, dim, width - 1), to be written to
     activation: either None or "silu" or "swish"
+
     out: (batch, dim, seqlen)
     """
-    #### 修改在这里！！！！！
-    return causal_conv1d_ref(x, weight, bias, seq_idx, initial_states, return_final_states, final_states_out,
-                             activation, )
+    return CausalConv1dFn.apply(x, weight, bias, activation)
 
 
 def causal_conv1d_ref(x, weight, bias=None, activation=None):
